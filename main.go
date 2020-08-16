@@ -1,35 +1,43 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
-	"io"
+	"io/ioutil"
+	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/kkdai/youtube"
 	voice "github.com/weeee9/discord-music-bot/play"
 )
 
-var (
-	buffer = make([][]byte, 0)
+const (
+	temDir = "./tmp"
 )
+
+var (
+	servers map[string]queue
+
+	stop = make(chan bool)
+)
+
+type queue struct {
+	songs []string
+}
+
+func init() {
+	createDirIfNotExist(temDir)
+}
 
 func main() {
 	discord, err := discordgo.New("Bot " + os.Getenv("DISCORD_BOT_TOKEN"))
 	if err != nil {
 		panic(err)
-	}
-
-	err = loadSound()
-	if err != nil {
-		fmt.Println("Error loading sound: ", err)
-		fmt.Println("Please copy $GOPATH/src/github.com/bwmarrin/examples/airhorn/airhorn.dca to this directory.")
-		return
 	}
 
 	discord.AddHandler(airhorn)
@@ -53,6 +61,60 @@ func airhorn(sess *discordgo.Session, msg *discordgo.MessageCreate) {
 	// This isn't required in this specific example but it's a good practice.
 	if msg.Author.ID == sess.State.User.ID {
 		return
+	}
+
+	ch, err := sess.State.Channel(msg.ChannelID)
+	if err != nil {
+		log.Println(err)
+		sess.ChannelMessageSend(msg.ChannelID, "sorry, something went wrong")
+		return
+	}
+	guild, err := sess.State.Guild(ch.GuildID)
+	if err != nil {
+		log.Println(err)
+		sess.ChannelMessageSend(msg.ChannelID, "sorry, something went wrong")
+		return
+	}
+
+	var isInVoiceChannel bool
+	var voiceChannelID string
+	for _, state := range guild.VoiceStates {
+		if state.UserID == msg.Author.ID {
+			voiceChannelID = state.ChannelID
+			isInVoiceChannel = true
+		}
+	}
+
+	args := strings.Split(msg.Content, " ")
+	switch args[0] {
+	case "!play":
+		if len(args) == 1 {
+			sess.ChannelMessageSend(msg.ChannelID, "you need to provide a link!")
+			return
+		}
+		if !isInVoiceChannel {
+			sess.ChannelMessageSend(msg.ChannelID, "you must be in a voice channel to play!")
+			return
+		}
+
+		if _, ok := servers[guild.ID]; !ok {
+			servers[guild.ID] = queue{}
+		}
+
+		server := servers[guild.ID]
+		_ = server
+
+		vc, err := sess.ChannelVoiceJoin(guild.ID, voiceChannelID, false, true)
+		if err != nil {
+			log.Println(err)
+			sess.ChannelMessageSend(msg.ChannelID, "sorry, something went wrong")
+			return
+		}
+		voice.PlayAudioFile(vc, "", stop)
+
+	case "!skip":
+	case "!stop":
+		stop <- true
 	}
 	if strings.HasPrefix(msg.Content, "!airhorn") {
 		ch, err := sess.State.Channel(msg.ChannelID)
@@ -85,66 +147,39 @@ func airhorn(sess *discordgo.Session, msg *discordgo.MessageCreate) {
 	}
 }
 
-// loadSound attempts to load an encoded sound file from disk.
-func loadSound() error {
+func downloadYtb(url string) ([]byte, error) {
+	client := youtube.Client{}
 
-	file, err := os.Open("./airhorn.dca")
+	video, err := client.GetVideo(url)
 	if err != nil {
-		fmt.Println("Error opening dca file :", err)
-		return err
+		return nil, err
 	}
 
-	var opuslen int16
-
-	for {
-		// Read opus frame length from dca file.
-		err = binary.Read(file, binary.LittleEndian, &opuslen)
-
-		// If this is the end of the file, just return.
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			err := file.Close()
-			if err != nil {
-				return err
-			}
-			return nil
-		}
-
-		if err != nil {
-			fmt.Println("Error reading from dca file :", err)
-			return err
-		}
-
-		// Read encoded pcm from dca file.
-		InBuf := make([]byte, opuslen)
-		err = binary.Read(file, binary.LittleEndian, &InBuf)
-
-		// Should not be any end of file errors
-		if err != nil {
-			fmt.Println("Error reading from dca file :", err)
-			return err
-		}
-
-		// Append encoded pcm data to the buffer.
-		buffer = append(buffer, InBuf)
+	resp, err := client.GetStream(video, &video.Streams[0])
+	if err != nil {
+		return nil, err
 	}
+	defer resp.Body.Close()
+	b, err := ioutil.ReadAll(resp.Body)
+
+	return b, err
 }
 
-func playSound(sess *discordgo.Session, guildID, channelID string) error {
-	vc, err := sess.ChannelVoiceJoin(guildID, channelID, false, true)
+func tempSave(guildID string, content []byte) error {
+	path := filepath.Join(temDir, guildID)
+	err := os.Mkdir(path, 0644)
 	if err != nil {
 		return err
 	}
 
-	time.Sleep(250 * time.Millisecond)
+	return nil
+}
 
-	vc.Speaking(true)
-
-	for _, buff := range buffer {
-		vc.OpusSend <- buff
+func createDirIfNotExist(dir string) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		err = os.MkdirAll(dir, 0755)
+		if err != nil {
+			panic(err)
+		}
 	}
-	vc.Speaking(false)
-
-	time.Sleep(250 * time.Millisecond)
-
-	return vc.Disconnect()
 }
