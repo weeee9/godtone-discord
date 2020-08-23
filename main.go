@@ -2,36 +2,22 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
+
+	"github.com/weeee9/godtone-discord/voice"
 
 	"github.com/bwmarrin/discordgo"
 	_ "github.com/joho/godotenv/autoload"
-	"github.com/kkdai/youtube"
-	voice "github.com/weeee9/discord-music-bot/play"
 )
 
-const (
-	temDir = "./tmp"
-)
+var servers = make(map[string]*voiceChannel)
 
-var (
-	servers map[string]queue
-
-	stop = make(chan bool)
-)
-
-type queue struct {
-	songs []string
-}
-
-func init() {
-	createDirIfNotExist(temDir)
+type voiceChannel struct {
+	vc        *discordgo.VoiceConnection
+	isPlaying bool
 }
 
 func main() {
@@ -40,7 +26,7 @@ func main() {
 		panic(err)
 	}
 
-	discord.AddHandler(airhorn)
+	discord.AddHandler(godtone)
 
 	if err := discord.Open(); err != nil {
 		panic(err)
@@ -56,13 +42,12 @@ func main() {
 	discord.Close()
 }
 
-func airhorn(sess *discordgo.Session, msg *discordgo.MessageCreate) {
+func godtone(sess *discordgo.Session, msg *discordgo.MessageCreate) {
 	// Ignore all messages created by the bot itself
 	// This isn't required in this specific example but it's a good practice.
 	if msg.Author.ID == sess.State.User.ID {
 		return
 	}
-
 	ch, err := sess.State.Channel(msg.ChannelID)
 	if err != nil {
 		log.Println(err)
@@ -75,7 +60,6 @@ func airhorn(sess *discordgo.Session, msg *discordgo.MessageCreate) {
 		sess.ChannelMessageSend(msg.ChannelID, "sorry, something went wrong")
 		return
 	}
-
 	var isInVoiceChannel bool
 	var voiceChannelID string
 	for _, state := range guild.VoiceStates {
@@ -84,102 +68,57 @@ func airhorn(sess *discordgo.Session, msg *discordgo.MessageCreate) {
 			isInVoiceChannel = true
 		}
 	}
-
-	args := strings.Split(msg.Content, " ")
-	switch args[0] {
-	case "!play":
-		if len(args) == 1 {
-			sess.ChannelMessageSend(msg.ChannelID, "you need to provide a link!")
-			return
-		}
+	switch msg.Content {
+	case "!操你媽過來一下":
 		if !isInVoiceChannel {
-			sess.ChannelMessageSend(msg.ChannelID, "you must be in a voice channel to play!")
+			sess.ChannelMessageSend(msg.ChannelID, "you must be in a voice channel")
 			return
 		}
-
-		if _, ok := servers[guild.ID]; !ok {
-			servers[guild.ID] = queue{}
-		}
-
-		server := servers[guild.ID]
-		_ = server
-
-		vc, err := sess.ChannelVoiceJoin(guild.ID, voiceChannelID, false, true)
-		if err != nil {
-			log.Println(err)
-			sess.ChannelMessageSend(msg.ChannelID, "sorry, something went wrong")
-			return
-		}
-		voice.PlayAudioFile(vc, "", stop)
-
-	case "!skip":
-	case "!stop":
-		stop <- true
-	}
-	if strings.HasPrefix(msg.Content, "!airhorn") {
-		ch, err := sess.State.Channel(msg.ChannelID)
-		if err != nil {
-			sess.ChannelMessageSend(msg.ChannelID, "ERROR CHANNEL STATE "+err.Error())
-			return
-		}
-
-		guild, err := sess.State.Guild(ch.GuildID)
-		if err != nil {
-			sess.ChannelMessageSend(msg.ChannelID, "ERROR GUILD STATE "+err.Error())
-			return
-		}
-
-		for _, vs := range guild.VoiceStates {
-			if vs.UserID == msg.Author.ID {
-				// err = playSound(sess, guild.ID, vs.ChannelID)
-
-				vc, err := sess.ChannelVoiceJoin(guild.ID, vs.ChannelID, false, true)
-				if err != nil {
-					sess.ChannelMessageSend(msg.ChannelID, "ERROR PLAYING SOUND "+err.Error())
-					return
-				}
-
-				// dgvoice.PlayAudioFile(vc, "./m4a/carry.mp4", make(chan bool))
-				stop := make(chan bool)
-				voice.PlayAudioFile(vc, "./m4a/carry.mp4", stop)
+		if _, ok := servers[voiceChannelID]; !ok {
+			vc, err := sess.ChannelVoiceJoin(guild.ID, voiceChannelID, false, true)
+			if err != nil {
+				log.Printf("failed to joined voice channel: %s\n", err.Error())
+				sess.ChannelMessageSend(msg.ChannelID, "something went worng...")
+				return
 			}
+			server := &voiceChannel{
+				vc: vc,
+			}
+			servers[voiceChannelID] = server
+		} else {
+			return
 		}
-	}
-}
-
-func downloadYtb(url string) ([]byte, error) {
-	client := youtube.Client{}
-
-	video, err := client.GetVideo(url)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := client.GetStream(video, &video.Streams[0])
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	b, err := ioutil.ReadAll(resp.Body)
-
-	return b, err
-}
-
-func tempSave(guildID string, content []byte) error {
-	path := filepath.Join(temDir, guildID)
-	err := os.Mkdir(path, 0644)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func createDirIfNotExist(dir string) {
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		err = os.MkdirAll(dir, 0755)
-		if err != nil {
-			panic(err)
+	case "!carry":
+		play(servers[voiceChannelID], "./m4a/carry.m4a")
+	case "!7414":
+		play(servers[voiceChannelID], "./m4a/goDie.m4a")
+	case "!那我也要睡拉":
+		play(servers[voiceChannelID], "./m4a/imGoingToSleep.m4a")
+	case "!你要先講":
+		play(servers[voiceChannelID], "./m4a/youHaveToSaidItFirst.m4a")
+	case "!滾蛋":
+		if _, ok := servers[voiceChannelID]; !ok {
+			return
 		}
+		servers[voiceChannelID].vc.Disconnect()
+		delete(servers, voiceChannelID)
 	}
+}
+
+func play(server *voiceChannel, file string) {
+	if server == nil || server.isPlaying {
+		return
+	}
+	server.isPlaying = true
+	done := make(chan bool)
+	stop := make(chan bool)
+	// voice pkg if modified from dbvoice
+	// please see: https://github.com/bwmarrin/dgvoice
+	go voice.PlayAudioFile(server.vc, file, done, stop)
+	go func() {
+		select {
+		case <-done:
+			server.isPlaying = false
+		}
+	}()
 }

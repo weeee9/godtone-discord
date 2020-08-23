@@ -1,10 +1,18 @@
+/*******************************************************************************
+ * This is very experimental code and probably a long way from perfect or
+ * ideal.  Please provide feed back on areas that would improve performance
+ *
+ */
+
+// Package dgvoice provides opus encoding and audio file playback for the
+// Discordgo package.
 package voice
 
 import (
 	"bufio"
 	"encoding/binary"
+	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -38,9 +46,9 @@ var OnError = func(str string, err error) {
 	prefix := "dgVoice: " + str
 
 	if err != nil {
-		os.Stderr.WriteString(prefix + ": " + err.Error())
+		os.Stderr.WriteString(prefix + ": " + err.Error() + "\n")
 	} else {
-		os.Stderr.WriteString(prefix)
+		os.Stderr.WriteString(prefix + "\n")
 	}
 }
 
@@ -65,7 +73,6 @@ func SendPCM(v *discordgo.VoiceConnection, pcm <-chan []int16) {
 		// read pcm from chan, exit if channel is closed.
 		recv, ok := <-pcm
 		if !ok {
-			OnError("PCM Channel closed", nil)
 			return
 		}
 
@@ -86,10 +93,53 @@ func SendPCM(v *discordgo.VoiceConnection, pcm <-chan []int16) {
 	}
 }
 
+// ReceivePCM will receive on the the Discordgo OpusRecv channel and decode
+// the opus audio into PCM then send it on the provided channel.
+func ReceivePCM(v *discordgo.VoiceConnection, c chan *discordgo.Packet) {
+	if c == nil {
+		return
+	}
+
+	var err error
+
+	for {
+		if v.Ready == false || v.OpusRecv == nil {
+			OnError(fmt.Sprintf("Discordgo not to receive opus packets. %+v : %+v", v.Ready, v.OpusSend), nil)
+			return
+		}
+
+		p, ok := <-v.OpusRecv
+		if !ok {
+			return
+		}
+
+		if speakers == nil {
+			speakers = make(map[uint32]*gopus.Decoder)
+		}
+
+		_, ok = speakers[p.SSRC]
+		if !ok {
+			speakers[p.SSRC], err = gopus.NewDecoder(48000, 2)
+			if err != nil {
+				OnError("error creating opus decoder", err)
+				continue
+			}
+		}
+
+		p.PCM, err = speakers[p.SSRC].Decode(p.Opus, 960, false)
+		if err != nil {
+			OnError("Error decoding opus data", err)
+			continue
+		}
+
+		c <- p
+	}
+}
+
 // PlayAudioFile will play the given filename to the already connected
 // Discord voice server/channel.  voice websocket and udp socket
 // must already be setup before this will work.
-func PlayAudioFile(v *discordgo.VoiceConnection, filename string, stop <-chan bool) {
+func PlayAudioFile(v *discordgo.VoiceConnection, filename string, done chan<- bool, stop <-chan bool) {
 
 	// Create a shell command "object" to run.
 	run := exec.Command("ffmpeg", "-i", filename, "-f", "s16le", "-ar", strconv.Itoa(frameRate), "-ac", strconv.Itoa(channels), "pipe:1")
@@ -125,8 +175,7 @@ func PlayAudioFile(v *discordgo.VoiceConnection, filename string, stop <-chan bo
 		if err != nil {
 			OnError("Couldn't stop speaking", err)
 		}
-		log.Println("disconnecting")
-		v.Disconnect()
+		done <- true
 	}()
 
 	send := make(chan []int16, 2)
